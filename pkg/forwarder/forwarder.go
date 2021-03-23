@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff"
 	"github.com/go-kit/kit/log"
-
 	"github.com/prometheus/client_golang/prometheus"
 	clientmodel "github.com/prometheus/client_model/go"
 
@@ -310,8 +310,20 @@ func (w *Worker) forward(ctx context.Context) error {
 	}
 	from.RawQuery = v.Encode()
 
+	var families []*clientmodel.MetricFamily
+	var err error
 	req := &http.Request{Method: "GET", URL: from}
-	families, err := w.fromClient.Retrieve(ctx, req)
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = w.interval / 2
+	retryable := func() error {
+		families, err = w.fromClient.Retrieve(ctx, req)
+		return err
+	}
+	notify := func(err error, t time.Duration) {
+		msg := fmt.Sprintf("error: %v happened at time: %v", err, t)
+		rlogger.Log(w.logger, rlogger.Warn, "msg", msg)
+	}
+	err = backoff.RetryNotify(retryable, b, notify)
 	if err != nil {
 		statusErr := w.status.UpdateStatus("Degraded", "Degraded", "Failed to retrieve metrics")
 		if statusErr != nil {
